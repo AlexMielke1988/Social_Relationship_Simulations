@@ -7,6 +7,7 @@ source("Scripts/index_calculations.R")
 library(betareg)
 library(parallel)
 library(doParallel)
+library(tidyverse)
 
 iterations = 100 # how many random focal assignments per dataset
 cores = 4 # how many cores for parallelisation
