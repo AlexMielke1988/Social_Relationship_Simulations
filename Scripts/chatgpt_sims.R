@@ -1,17 +1,20 @@
 
 # Load Packages -----------------------------------------------------------
 library(tidyverse)
+library(brms)
 
 # Create Individuals ------------------------------------------------------
 
 # Set seed for reproducibility
 set.seed(123)
-nr_individuals <- 20
+nr_individuals <- 40
 error_ranks <- 0.05
-rank_subset <- 0.3
-nr_males <- 8
+rank_subset <- 1
+nr_males <- 15
 male_male_bias <- 0.1
-female_female_bias <- 4
+female_female_bias <-4
+bouts_per_day <- 4
+total_bouts <- bouts_per_day * 365 * nr_individuals
 
 # Generate x individuals with hierarchy rank values between 1 and x
 
@@ -42,9 +45,9 @@ probabilities <- function(numbers, difference) {
 # Generate Rank Interactions ----------------------------------------------
 
 
-# Generate 5000 interactions between pairs of individuals
+# Generate 10000 interactions between pairs of individuals
 interactions <- data.frame()
-for (i in 1:5000) {
+for (i in 1:10000) {
   # Select two individuals with similar rank values
   sender <- individuals[sample.int(nrow(individuals), 1), ]
   receiver <- individuals[sample.int(sender$ID, 1, prob = probabilities(1:sender$ID, difference = 10)), ]
@@ -87,7 +90,7 @@ subset_interactions <- interactions %>% sample_frac(rank_subset)
 
 # Calculate Elo ratings for dominance hierarchy
 elo_ratings <- rep(1000, nrow(individuals))  # Initialize Elo ratings for each individual
-k_factor <- 20  # K-factor determines the impact of each interaction on Elo ratings
+k_factor <- 100  # K-factor determines the impact of each interaction on Elo ratings
 
 # Function to calculate expected probability of winning for a given Elo rating difference
 calculate_expected <- function(rating_diff) {
@@ -195,21 +198,25 @@ sex_prob <- adjacency_matrix / rowSums(adjacency_matrix, na.rm = TRUE)
 set.seed(123)
 
 # Create the 'grooming_data' data frame
-grooming_data <- data.frame(Sender = character(10000), Receiver = character(10000), Date = as.Date(character(10000), format = "%Y-%m-%d"), stringsAsFactors = FALSE)
+grooming_data <- data.frame(Sender = character(total_bouts), Receiver = character(total_bouts), Date = as.Date(character(total_bouts), format = "%Y-%m-%d"), stringsAsFactors = FALSE)
 all_matrix <- sex_prob * similarity_prob * elo_prob
 all_matrix <- all_matrix ^ 3
 all_matrix <- all_matrix/rowSums(all_matrix)
 
-individuals$Sociability <- ifelse(individuals$Sex == 'm', sample(rnorm(100, mean = 20, sd = 3)), sample(rnorm(100, mean = 40, sd = 5)))
+individuals$Sociability <- ifelse(individuals$Sex == 'm', sample(rnorm(100, mean = 20, sd = 2)), sample(rnorm(100, mean = 40, sd = 2)))
 individuals$Sociability <- individuals$Sociability / sum(individuals$Sociability)
 
 # Iterate through each row of 'grooming_data' to simulate data points
-for (i in 1:10000) {
+for (i in 1:total_bouts) {
   # Randomly select a Sender
   grooming_data$Sender[i] <- sample(individuals$ID, 1, prob = individuals$Sociability)
 
   # Randomly select the Date between 01/01/2022 and 31/12/2022
   grooming_data$Date[i] <- as.Date(sample(ISOdate(2022, 1:12, 1:31), 1))
+
+  # add random our and minute
+  grooming_data$Hour <- sample(7:17, 1)
+  grooming_data$Minute <- sample(0:59, 1)
 
   # Randomly select the Receiver based on the probabilities of the Sender
   sender_index <- match(grooming_data$Sender[i], individuals$ID)
@@ -219,26 +226,37 @@ for (i in 1:10000) {
 }
 
 
-xx = grooming_data %>%
-  group_by(Sender, Receiver) %>%
-  summarise(count = n()) %>%
-  ungroup() %>%
-  mutate(Sender = as.character(Sender)) %>%
+xx = expand_grid(Sender = unique(grooming_data$Sender),
+                 Receiver = unique(grooming_data$Receiver)) %>%
+  left_join(
+    grooming_data %>%
+      group_by(Sender, Receiver) %>%
+      summarise(count = n()) %>%
+      ungroup() %>%
+      mutate(Sender = as.character(Sender))) %>%
   left_join(individuals %>%
               mutate(ID = as.character(ID)) , by = c('Sender' = 'ID')) %>%
   rename(c(EloSender = 'EloRating', SexSender = 'Sex')) %>%
   left_join(individuals %>%
               mutate(ID = as.character(ID)) , by = c('Receiver' = 'ID')) %>%
-  rename(c(EloReceiver = 'EloRating', SexReceiver = 'Sex'))
+  rename(c(EloReceiver = 'EloRating', SexReceiver = 'Sex')) %>%
+  mutate(EloSender = as.vector(scale(EloSender))) %>%
+  mutate(EloReceiver = as.vector(scale(EloReceiver)))
 
-model = lm(data = xx, count ~ EloSender * EloReceiver + SexReceiver * SexSender)
+model = brm(data = xx,
+                 count ~ 1 +
+                   EloSender * EloReceiver +
+                   SexReceiver * SexSender + (1|Sender) + (1|Receiver),
+            family = zero_inflated_poisson(),
+            chains = 2, cores = 10, seed = 2807)
 
 library(broom)
+library(broom.mixed)
 library(ggplot2)
 library(plotly)
 
 # Get predicted values from the model
-predicted_data <- augment(model)
+predicted_data <- broom.mixed::augment(model)
 
 
 # Create the 3D scatter plot
@@ -250,7 +268,80 @@ plot_ly(predicted_data, x = ~EloSender, y = ~EloReceiver, z = ~.fitted, color = 
                       aspectmode = "manual",
                       aspectratio = list(x = 1, y = 1, z = 0.8)))
 
-plot_ly(predicted_data, x = ~SexSender, y = ~SexReceiver, z = ~.fitted, color = ~.fitted,
+
+predicted_data %>% mutate(.fitted = .fitted) %>% ggplot(aes(x = SexSender, y = .fitted, color = SexReceiver)) +
+  geom_jitter()
+
+
+# extract data for users
+## Observation times
+focal_times <- data.frame(
+  Date = sort(rep(seq(start_date, end_date, by = "day"), length(7:17))),
+  Time.start = 7:17)
+
+focal_times <- focal_times %>%
+  mutate(Focal = as.character(sample(individuals$ID, nrow(focal_times), replace = T)))
+
+focal_times <- focal_times %>%
+  slice_sample(prop = .8) %>%
+  arrange(Date, Time.start)
+
+## sum focal observations
+
+obs_times <- focal_times %>%
+  group_by(Focal) %>%
+  summarise(Observation_time = n()) %>%
+  ungroup()
+
+## extract grooming
+
+grooming_data_focalled <-
+  grooming_data %>%
+  left_join(focal_times, by = c('Date' = 'Date', 'Hour' = 'Time.start')) %>%
+  filter(Sender == Focal | Receiver == Focal)
+
+
+xx1 = expand_grid(Sender = unique(grooming_data$Sender),
+                  Receiver = unique(grooming_data$Receiver)) %>%
+  left_join(
+    grooming_data_focalled %>%
+      group_by(Sender, Receiver) %>%
+      summarise(count = n()) %>%
+      ungroup() %>%
+      mutate(Sender = as.character(Sender))) %>%
+  replace_na(replace = list('count' = 0)) %>%
+  left_join(individuals %>%
+              mutate(ID = as.character(ID)) , by = c('Sender' = 'ID')) %>%
+  rename(c(EloSender = 'EloRating', SexSender = 'Sex')) %>%
+  left_join(individuals %>%
+              mutate(ID = as.character(ID)) , by = c('Receiver' = 'ID')) %>%
+  rename(c(EloReceiver = 'EloRating', SexReceiver = 'Sex')) %>%
+  left_join(obs_times %>%
+              mutate(Focal = as.character(Focal)), by = c('Sender' = 'Focal')) %>%
+  rename(c(Observation_time_sender = 'Observation_time')) %>%
+  left_join(obs_times %>%
+              mutate(Focal = as.character(Focal)), by = c('Receiver' = 'Focal')) %>%
+  rename(c(Observation_time_receiver = 'Observation_time')) %>%
+  mutate(Observation_time = Observation_time_sender + Observation_time_receiver) %>%
+  select(-Observation_time_receiver, -Observation_time_sender) %>%
+  mutate(rate = count/Observation_time) %>%
+  mutate(EloSender = as.vector(scale(EloSender))) %>%
+  mutate(EloReceiver = as.vector(scale(EloReceiver)))
+
+model1 = brm(data = xx1,
+             count ~ 1 +
+               EloSender * EloReceiver +
+               SexReceiver * SexSender + offset(log(Observation_time)) + (1|Sender) + (1|Receiver),
+             family = zero_inflated_poisson(),
+             chains = 2, cores = 10, seed = 2807)
+
+
+# Get predicted values from the model
+predicted_data <- broom.mixed::augment(model1)
+
+
+# Create the 3D scatter plot
+plot_ly(predicted_data, x = ~EloSender, y = ~EloReceiver, z = ~.fitted, color = ~.fitted,
         colors = viridisLite::viridis(256), type = "scatter3d", mode = "markers") %>%
   layout(scene = list(xaxis = list(title = "EloSender"),
                       yaxis = list(title = "EloReceiver"),
@@ -258,3 +349,5 @@ plot_ly(predicted_data, x = ~SexSender, y = ~SexReceiver, z = ~.fitted, color = 
                       aspectmode = "manual",
                       aspectratio = list(x = 1, y = 1, z = 0.8)))
 
+predicted_data %>% mutate(.fitted = .fitted)%>% ggplot(aes(x = SexSender, y = .fitted, color = SexReceiver)) +
+  geom_jitter() + ylim(0,100)
